@@ -18,6 +18,7 @@ export default function Shell({ children }) {
         <NavLink to="/books" className={link}>Books</NavLink>
         <NavLink to="/customers" className={link}>Customers</NavLink>
         <NavLink to="/sell" className={link}>Sell</NavLink>
+<NavLink to="/activity" className={link}>Log</NavLink>
         <button onClick={signOut} className="flex-1 py-3 text-center text-sm text-slate-500">Logout</button>
       </nav>
     </div>

@@ -6,6 +6,7 @@ import Home from './pages/Home'
 import Books from './pages/Books'
 import Customers from './pages/Customers'
 import Sell from './pages/Sell'
+import Activity from './pages/Activity'
 
 function Guard({ children }) {
   const { user, loading } = useAuth()
@@ -23,6 +24,7 @@ export default function App() {
           <Route path="/books" element={<Guard><Books /></Guard>} />
           <Route path="/customers" element={<Guard><Customers /></Guard>} />
           <Route path="/sell" element={<Guard><Sell /></Guard>} />
+      <Route path="/activity" element={<Guard><Activity /></Guard>} />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
       </BrowserRouter>

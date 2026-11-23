@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
+import { useOfflineQueue } from '../lib/offlineQueue'
 import { useAuth } from '../auth/AuthContext'
 
 const empty = { name: '', phone: '', address: '', notes: '' }
@@ -22,9 +23,11 @@ export default function Customers() {
     if (data) {
       setCustomers(data)
       const { data: bal } = await supabase.from('customer_balances').select('*')
-      if (bal) setBalances(Object.fromEntries(bal.map((b) => [b.customer_id, Number(b.balance)))))
+      if (bal) setBalances(Object.fromEntries(bal.map((b) => [b.customer_id, Number(b.balance)])))
     }
   }
+
+  const { online, pendingCount, pending, failed, syncing, enqueue, sync, removeOp } = useOfflineQueue(load)
 
   useEffect(() => {
     load()
@@ -40,8 +43,9 @@ export default function Customers() {
     setSelected(c)
     const { data: s } = await supabase.from('sales').select('*, books(title)').eq('customer_id', c.id).order('sold_at', { ascending: false })
     const { data: p } = await supabase.from('payments').select('*').eq('customer_id', c.id).order('recorded_at', { ascending: false })
-    setHistory([...(s || []).map((x) => ({ ...x, kind: 'sale' })), ...(p || []).map((x) => ({ ...x, kind: 'payment' }))])
-      .sort((a, b) => new Date(b.sold_at || b.recorded_at) - new Date(a.sold_at || a.recorded_at))
+    const merged = [...(s || []).map((x) => ({ ...x, kind: 'sale' })), ...(p || []).map((x) => ({ ...x, kind: 'payment' }))]
+    merged.sort((a, b) => new Date(b.sold_at || b.recorded_at) - new Date(a.sold_at || a.recorded_at))
+    setHistory(merged)
   }
 
   const save = async (e) => {
@@ -59,7 +63,13 @@ export default function Customers() {
     e.preventDefault()
     const amount = Number(payAmount)
     if (!amount || amount <= 0) return
-    const { error } = await supabase.from('payments').insert({ customer_id: selected.id, amount, recorded_by: user.id })
+    const payload = { customer_id: selected.id, amount, recorded_by: user.id }
+    if (!navigator.onLine) {
+      enqueue({ type: 'payment', payload, meta: { customerName: selected.name, amount } })
+      setPayAmount('')
+      return
+    }
+    const { error } = await supabase.from('payments').insert(payload)
     if (!error) { setPayAmount(''); load(); openDetail({ ...selected }) }
   }
 
@@ -79,6 +89,28 @@ export default function Customers() {
           <p className="text-xs text-slate-500">Outstanding balance</p>
           <p className={`text-2xl font-bold ${bal > 0 ? 'text-red-700' : 'text-green-700'}`}>₦{bal.toLocaleString()}</p>
         </div>
+        {!online && <p className="text-sm bg-slate-200 rounded-xl px-3 py-2">📴 Offline — payments will queue.</p>}
+        {online && pendingCount > 0 && (
+          <button onClick={sync} disabled={syncing}
+            className="text-sm bg-amber-100 text-amber-800 rounded-xl px-3 py-2 w-full disabled:opacity-60">
+            {syncing ? '⏳ Syncing…' : `⏳ ${pendingCount} queued — tap to sync now`}
+          </button>
+        )}
+        {pending.filter((op) => op.type === 'payment' && op.payload.customer_id === selected.id).map((op) => (
+          <div key={op.queuedAt} className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-sm flex justify-between items-center">
+            <p>Queued payment: ₦{Number(op.meta?.amount || 0).toLocaleString()} · {new Date(op.queuedAt).toLocaleString()}</p>
+            <button onClick={() => removeOp(op.queuedAt)} className="text-xs text-red-600 border rounded-lg px-2 py-1 ml-2 shrink-0">Discard</button>
+          </div>
+        ))}
+        {failed.filter((op) => op.type === 'payment' && op.payload.customer_id === selected.id).map((op) => (
+          <div key={op.queuedAt} className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm">
+            <p>Payment ₦{Number(op.meta?.amount || 0).toLocaleString()} failed: {op.error}</p>
+            <div className="flex gap-2 mt-2">
+              <button onClick={sync} disabled={syncing} className="text-xs bg-white border rounded-lg px-3 py-1.5 disabled:opacity-60">Retry</button>
+              <button onClick={() => removeOp(op.queuedAt)} className="text-xs border rounded-lg px-3 py-1.5 text-red-600">Discard</button>
+            </div>
+          </div>
+        ))}
         <form onSubmit={recordPayment} className="flex gap-2">
           <input className="flex-1 border rounded-xl p-3 bg-white" type="number" min="1" step="0.01"
             placeholder="Record payment…" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} />
