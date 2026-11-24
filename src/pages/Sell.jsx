@@ -5,6 +5,7 @@ import { useOfflineQueue } from '../lib/offlineQueue'
 export default function Sell() {
   const [books, setBooks] = useState([])
   const [customers, setCustomers] = useState([])
+  const [balances, setBalances] = useState({})
   const [today, setToday] = useState([])
   const [bookId, setBookId] = useState('')
   const [customerId, setCustomerId] = useState('')
@@ -18,6 +19,8 @@ export default function Sell() {
     if (b) setBooks(b)
     const { data: c } = await supabase.from('customers').select('*').order('name')
     if (c) setCustomers(c)
+    const { data: bal } = await supabase.from('customer_balances').select('*')
+    if (bal) setBalances(Object.fromEntries(bal.map((x) => [x.customer_id, Number(x.balance)])))
     const start = new Date()
     start.setHours(0, 0, 0, 0)
     const { data: s } = await supabase.from('sales')
@@ -40,8 +43,19 @@ export default function Sell() {
   }, [])
 
   const book = books.find((b) => b.id === bookId)
+  const customer = customers.find((c) => c.id === customerId)
   const total = book ? Number(qty || 0) * Number(book.sale_price) : 0
-  const due = Math.max(0, total - (Number(paid) || 0))
+  const paidNum = Number(paid) || 0
+
+  // Credit / balance math (mirrors process_sale RPC)
+  const credit = customer ? Number(customer.credit_balance || 0) : 0
+  const creditUsed = Math.min(credit, total)
+  const afterCredit = total - creditUsed
+  const oldBalance = customerId ? (balances[customerId] || 0) : 0
+  const newDue = Math.max(0, afterCredit - paidNum)
+  const changeDue = Math.max(0, paidNum - afterCredit)
+  const newCredit = Math.max(0, paidNum - afterCredit)
+  const totalOwedAfter = oldBalance + newDue
 
   const submit = async (e) => {
     e.preventDefault()
@@ -49,21 +63,19 @@ export default function Sell() {
     if (!bookId || !customerId) return setMsg('Pick a book and a customer.')
     const nQty = Number(qty)
     if (!nQty || nQty < 1) return setMsg('Quantity must be at least 1.')
-    // Snapshot price + title at sale time so queued sales keep what the
-    // customer was actually charged, even if the price changes later.
     const payload = {
       p_book_id: bookId,
       p_customer_id: customerId,
       p_qty: nQty,
       p_unit_price: Number(book.sale_price),
-      p_amount_paid: Number(paid) || 0
+      p_amount_paid: paidNum
     }
     const meta = {
       bookTitle: book.title,
-      customerName: customers.find((c) => c.id === customerId)?.name || '',
+      customerName: customer?.name || '',
       qty: nQty,
       total,
-      paid: Number(paid) || 0
+      paid: paidNum
     }
     if (!navigator.onLine) {
       enqueue({ type: 'sale', payload, meta })
@@ -74,7 +86,12 @@ export default function Sell() {
     const { error } = await supabase.rpc('process_sale', payload)
     if (error) setMsg(error.message)
     else {
-      setOk(`Sale recorded. ${due > 0 ? `₦${due.toLocaleString()} owed.` : 'Fully paid.'}`)
+      const parts = []
+      if (creditUsed > 0) parts.push(`₦${creditUsed.toLocaleString()} credit applied`)
+      if (changeDue > 0) parts.push(`change due ₦${changeDue.toLocaleString()}`)
+      if (newCredit > 0) parts.push(`₦${newCredit.toLocaleString()} saved as credit`)
+      if (totalOwedAfter > 0) parts.push(`customer now owes ₦${totalOwedAfter.toLocaleString()}`)
+      setOk(`Sale recorded.${parts.length ? ' ' + parts.join(' · ') + '.' : ' Fully paid.'}`)
       setBookId(''); setCustomerId(''); setQty('1'); setPaid('')
       load()
     }
@@ -152,6 +169,15 @@ export default function Sell() {
           <option value="">— Select customer —</option>
           {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
+
+        {customer && (
+          <div className="text-sm rounded-xl px-3 py-2 bg-slate-50">
+            {credit > 0 && <p className="text-green-700 font-semibold">💳 Has ₦{credit.toLocaleString()} credit</p>}
+            {oldBalance > 0 && <p className="text-red-600 font-semibold">⚠️ Owes ₦{oldBalance.toLocaleString()} from before</p>}
+            {credit === 0 && oldBalance === 0 && <p className="text-slate-500">No balance, no credit</p>}
+          </div>
+        )}
+
         <div className="grid grid-cols-2 gap-3">
           <label className="text-sm">Qty
             <input className="w-full border rounded-xl p-3 mt-1" type="number" min="1"
@@ -159,15 +185,27 @@ export default function Sell() {
           </label>
           <label className="text-sm">Amount paid
             <input className="w-full border rounded-xl p-3 mt-1" type="number" min="0" step="0.01"
-              value={paid} onChange={(e) => setPaid(e.target.value)} placeholder={total ? String(total) : '0'} />
+              value={paid} onChange={(e) => setPaid(e.target.value)} placeholder={afterCredit ? String(afterCredit) : '0'} />
           </label>
         </div>
+
         {book && (
-          <p className="text-sm">Total: <b>₦{total.toLocaleString()}</b>
-            {due > 0 && <span className="text-red-600"> · balance ₦{due.toLocaleString()}</span>}
-            {due === 0 && total > 0 && <span className="text-green-600"> · fully paid</span>}
-          </p>
+          <div className="text-sm space-y-1 bg-slate-50 rounded-xl px-3 py-2">
+            <p>Total: <b>₦{total.toLocaleString()}</b></p>
+            {creditUsed > 0 && <p className="text-green-700">Credit applied: −₦{creditUsed.toLocaleString()}</p>}
+            {afterCredit !== total && <p>To pay now: <b>₦{afterCredit.toLocaleString()}</b></p>}
+            {paidNum > 0 && changeDue > 0 && (
+              <p className="text-amber-700 font-semibold">💵 Change due: ₦{changeDue.toLocaleString()}</p>
+            )}
+            {paidNum > 0 && newCredit > 0 && (
+              <p className="text-green-700">₦{newCredit.toLocaleString()} will be saved as credit</p>
+            )}
+            {newDue > 0 && <p className="text-red-600">New balance: ₦{newDue.toLocaleString()}</p>}
+            {totalOwedAfter > 0 && <p className="text-red-600 font-semibold">Total owed after: ₦{totalOwedAfter.toLocaleString()}</p>}
+            {newDue === 0 && totalOwedAfter === 0 && total > 0 && <p className="text-green-600">Fully paid ✓</p>}
+          </div>
         )}
+
         <button className="w-full bg-[#1e3a5f] text-white rounded-xl p-3 font-semibold" type="submit">
           Record sale
         </button>

@@ -63,6 +63,8 @@ export default function Customers() {
     e.preventDefault()
     const amount = Number(payAmount)
     if (!amount || amount <= 0) return
+    const bal = balances[selected.id] || 0
+    const excess = Math.max(0, amount - bal)
     const payload = { customer_id: selected.id, amount, recorded_by: user.id }
     if (!navigator.onLine) {
       enqueue({ type: 'payment', payload, meta: { customerName: selected.name, amount } })
@@ -70,7 +72,13 @@ export default function Customers() {
       return
     }
     const { error } = await supabase.from('payments').insert(payload)
-    if (!error) { setPayAmount(''); load(); openDetail({ ...selected }) }
+    if (!error) {
+      // Overpayment becomes credit
+      if (excess > 0) {
+        await supabase.rpc('add_credit', { p_customer_id: selected.id, p_amount: excess })
+      }
+      setPayAmount(''); load(); openDetail({ ...selected })
+    }
   }
 
   const filtered = customers.filter((c) =>
@@ -88,6 +96,9 @@ export default function Customers() {
         <div className={`rounded-2xl p-4 shadow ${bal > 0 ? 'bg-red-50' : 'bg-green-50'}`}>
           <p className="text-xs text-slate-500">Outstanding balance</p>
           <p className={`text-2xl font-bold ${bal > 0 ? 'text-red-700' : 'text-green-700'}`}>₦{bal.toLocaleString()}</p>
+          {Number(selected.credit_balance || 0) > 0 && (
+            <p className="text-sm text-green-700 mt-1">💳 Credit: ₦{Number(selected.credit_balance).toLocaleString()}</p>
+          )}
         </div>
         {!online && <p className="text-sm bg-slate-200 rounded-xl px-3 py-2">📴 Offline — payments will queue.</p>}
         {online && pendingCount > 0 && (
@@ -160,7 +171,7 @@ export default function Customers() {
                 <p className="text-xs text-slate-500">{c.phone}</p>
               </div>
               <span className={`text-sm font-bold ${bal > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                {bal > 0 ? `owes ₦${bal.toLocaleString()}` : 'settled'}
+                {bal > 0 ? `owes ₦${bal.toLocaleString()}` : Number(c.credit_balance || 0) > 0 ? `₦${Number(c.credit_balance).toLocaleString()} credit` : 'settled'}
               </span>
             </button>
           )
